@@ -14,6 +14,8 @@ At the simplest level:
 
 ```cs
 var client = new SingyeongClientBuilder("application id here")
+    // Repeat this for how much initial metadata you have
+    .AddMetadata<TValue>("name", value)
     // Repeat this for however many endpoints you have
     .AddEndpoint("ws://localhost:4000/gateway/websocket", null)
     .Build();
@@ -32,6 +34,24 @@ await client.SendToAsync("application id here", payload,
         x.Metadata<string[]>("tags").Contains("production")
     );
 ```
+To update/remove metadata, use:
+```cs
+await client.SetMetadataAsync<TValue>("key", value);
+await client.RemoveMetadataAsync("key");
+```
+To read dispatches, use:
+```cs
+var reader = client.DispatchReader;
+while (await reader.WaitToReadAsync(cancellationToken))
+{
+    while (reader.TryRead(out var dispatch))
+    {
+        // dispatch is the raw payload sent in the dispatch, including the
+        // nonce field. This is so you can implement your own reading logic on
+        // top of this, as well as get access to the nonce for indempotency if
+        // necessary.
+    }
+}
 
 ## To-Do ##
 
