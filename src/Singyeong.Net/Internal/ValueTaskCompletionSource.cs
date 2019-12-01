@@ -94,22 +94,21 @@ namespace Singyeong.Internal
                 ValueTaskCompletionSource<TResult> instance,
                 CancellationToken cancellationToken)
             {
-                // Needs to refer by name or else will cause CS8422
                 await using var registration = cancellationToken.Register(
-                    ValueTaskCompletionSource<TResult>.SetCanceled, instance);
+                    (x) => SetCanceled(x), instance);
                 return await new ValueTask<TResult>(instance,
                     instance._core.Version);
+
+                static void SetCanceled(object? state)
+                {
+                    Debug.Assert(state is ValueTaskCompletionSource<TResult>);
+                    var instance = (ValueTaskCompletionSource<TResult>)state;
+
+                    _ = instance.TrySetException(
+                        new OperationCanceledException(
+                            instance._currentCancelToken));
+                }
             }
-        }
-
-        private static void SetCanceled(object? state)
-        {
-            Debug.Assert(state is ValueTaskCompletionSource<TResult>);
-            var instance = (ValueTaskCompletionSource<TResult>)state;
-
-            _ = instance.TrySetException(
-                new OperationCanceledException(
-                    instance._currentCancelToken));
         }
     }
 }

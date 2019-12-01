@@ -11,6 +11,8 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Singyeong.Converters;
+using System.Collections.Concurrent;
+using System.Linq;
 
 namespace Singyeong
 {
@@ -32,8 +34,12 @@ namespace Singyeong
         private readonly CancellationTokenSource _disposeCancelToken;
         private readonly ValueTaskCompletionSource<int> _heartbeatPromise;
 
+        private readonly ConcurrentDictionary<string, SingyeongMetadata>
+            _metadata;
+
         private readonly Channel<SingyeongPayload> _sendQueue;
         private readonly Channel<JsonDocument> _receiveQueue;
+
 
         private string? _clientId;
         private int _started = 0;
@@ -43,6 +49,13 @@ namespace Singyeong
 
         private long _lastHeartbeatAck;
         private long _lastHeartbeat;
+
+        /// <summary>
+        /// A <see cref="ChannelReader{T}"/> used to read dispatches from
+        /// Singyeong.
+        /// </summary>
+        public ChannelReader<JsonDocument> DispatchReader
+            => _receiveQueue.Reader;
 
         private static JsonSerializerOptions GetSerializerOptions()
         {
@@ -56,7 +69,8 @@ namespace Singyeong
         internal SingyeongClient(IReadOnlyList<(Uri, string)> endpoints,
             string applicationId, ChannelOptions? sendOptions,
             ChannelOptions? receiveOptions,
-            Action<ClientWebSocketOptions>? configureWebSocket)
+            Action<ClientWebSocketOptions>? configureWebSocket,
+            IDictionary<string, SingyeongMetadata> _initialMetadata)
         {
             _endpoints = endpoints;
             _applicationId = applicationId;
@@ -68,6 +82,9 @@ namespace Singyeong
             _heartbeatPromise = new ValueTaskCompletionSource<int>();
 
             _heartbeatPromise.SetResult(0);
+
+            _metadata = new ConcurrentDictionary<string, SingyeongMetadata>(
+                _initialMetadata);
 
             if (sendOptions == null)
                 _sendQueue = Channel.CreateBounded<SingyeongPayload>(128);
@@ -222,7 +239,7 @@ namespace Singyeong
         }
 
         /// <summary>
-        /// Enqueues an item to be sent to multiple clients
+        /// Enqueues an item to be sent to multiple clients.
         /// </summary>
         /// <param name="application">
         /// The application to send the message to.
@@ -263,6 +280,77 @@ namespace Singyeong
                     Payload = item
                 }
             }, cancellationToken);
+        }
+
+        /// <summary>
+        /// Sets a piece of metadata on the client and enqueues a metadata update
+        /// to be sent to the Singyeong server.
+        /// </summary>
+        /// <param name="key">
+        /// The metadata key to set.
+        /// </param>
+        /// <param name="value">
+        /// The metadata value to set.
+        /// </param>
+        /// <typeparam name="T">
+        /// The type of value to specify.
+        /// </typeparam>
+        /// <returns>
+        /// A <see cref="ValueTask"/> which complete when the write operation
+        /// completes.
+        /// </returns>
+        public ValueTask SetMetadataAsync<T>(string key, T value)
+        {
+            if (!TypeUtility.IsSupported<T>())
+                throw new ArgumentException(
+                    $"{typeof(T).Name} is not a supported metadata type.",
+                    nameof(value));
+
+            var metadata = _metadata.GetOrAdd(key,
+                (_) => new SingyeongMetadata
+                {
+                    Type = TypeUtility.GetTypeName(value),
+                    Value = value
+                });
+
+            if (!ReferenceEquals(metadata.Value, value))
+            {
+                metadata.Type = TypeUtility.GetTypeName(value);
+                metadata.Value = value;
+            }
+
+            return _sendQueue.Writer.WriteAsync(new SingyeongDispatch
+            {
+                DispatchType = "UPDATE_METADATA",
+                Payload = _metadata.ToDictionary(x => x.Key, x => x.Value)
+            });
+        }
+
+        /// <summary>
+        /// Removes a piece of metadata on the client and enqueues a metadata
+        /// update to be sent to the Singyeong server.
+        /// </summary>
+        /// <remarks>
+        /// The metadata update is only enqueued if the metadata field was
+        /// actually removed.
+        /// </remarks>
+        /// <param name="key">
+        /// The metadata key to remove.
+        /// </param>
+        /// <returns>
+        /// A <see cref="ValueTask"/> which complete when the write operation
+        /// completes.
+        /// </returns>
+        public ValueTask RemoveMetadataAsync(string key)
+        {
+            if (!_metadata.TryRemove(key, out var _))
+                return default;
+
+            return _sendQueue.Writer.WriteAsync(new SingyeongDispatch
+            {
+                DispatchType = "UPDATE_METADATA",
+                Payload = _metadata.ToDictionary(x => x.Key, x => x.Value)
+            });
         }
 
         private (Uri, string) GetEndpoint(Random random)
@@ -525,6 +613,12 @@ namespace Singyeong
                                     savedDispatch =
                                         SingyeongDispatchType.Broadcast;
                             }
+                            // TODO: remove this when/if this gets fixed:
+                            // https://github.com/queer/singyeong/issues/73
+                            else
+                            {
+                                savedDispatch = SingyeongDispatchType.Send;
+                            }
 
                             // Other dispatch types will remain unhandled.
                             break;
@@ -617,6 +711,13 @@ namespace Singyeong
         {
             if (ready.ClientId != _clientId)
                 return new ValueTask<bool>(false);
+
+            if (!_metadata.IsEmpty)
+                return WriteToQueue(sendQueue, new SingyeongDispatch
+                {
+                    DispatchType = "UPDATE_METADATA",
+                    Payload = _metadata.ToDictionary(x => x.Key, x => x.Value)
+                }, cancellationToken);
 
             return new ValueTask<bool>(true);
         }

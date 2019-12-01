@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Net.WebSockets;
 using System.Threading.Channels;
+using Singyeong.Internal;
+using Singyeong.Protocol;
 
 namespace Singyeong
 {
@@ -11,6 +13,7 @@ namespace Singyeong
     public sealed class SingyeongClientBuilder
     {
         private readonly List<(Uri endpoint, string authToken)> _endpoints;
+        private readonly Dictionary<string, SingyeongMetadata> _metadata;
         private readonly string _applicationId;
 
         private ChannelOptions? _sendChannelOptions;
@@ -26,6 +29,7 @@ namespace Singyeong
         public SingyeongClientBuilder(string applicationId)
         {
             _endpoints = new List<(Uri, string)>();
+            _metadata = new Dictionary<string, SingyeongMetadata>();
             _applicationId = applicationId;
         }
 
@@ -131,6 +135,40 @@ namespace Singyeong
         }
 
         /// <summary>
+        /// Adds an initial metadata value to the singyeong client.
+        /// </summary>
+        /// <param name="key">
+        /// The metadata key to add.
+        /// </param>
+        /// <param name="value">
+        /// The metadata value to add.
+        /// </param>
+        /// <typeparam name="T">
+        /// The type of value to specify.
+        /// </typeparam>
+        /// <returns>
+        /// A reference to this instance after the operation has completed.
+        /// </returns>
+        public SingyeongClientBuilder AddMetadata<T>(string key, T value)
+        {
+            if (!TypeUtility.IsSupported<T>())
+                throw new ArgumentException(
+                    $"{typeof(T).Name} is not a supported metadata type.",
+                    nameof(value));
+
+            if (!_metadata.TryAdd(key, new SingyeongMetadata
+            {
+                Type = TypeUtility.GetTypeName(value),
+                Value = value
+            }))
+                throw new ArgumentException(
+                    $"Metadata '{key}' was already added to the client",
+                    nameof(key));
+
+            return this;
+        }
+
+        /// <summary>
         /// Builds the singyeong client with the given options.
         /// </summary>
         /// <returns>
@@ -141,7 +179,7 @@ namespace Singyeong
         {
             return new SingyeongClient(_endpoints, _applicationId,
                 _sendChannelOptions, _receiveChannelOptions,
-                _configureClientWebSocket);
+                _configureClientWebSocket, _metadata);
         }
     }
 }
