@@ -52,6 +52,7 @@ while (await reader.WaitToReadAsync(cancellationToken))
         // necessary.
     }
 }
+```
 
 ## To-Do ##
 
