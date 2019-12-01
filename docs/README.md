@@ -35,8 +35,6 @@ await client.SendToAsync("application id here", payload,
 
 ## To-Do ##
 
-- Allow reading of dispatches from user code
-- Allow specifying metadata so the above filters actually work
 - Add further error handling
 - Set up CI
 - Publish NuGet packages
