@@ -44,7 +44,7 @@
     <Product>Singyeong.Net</Product>
     <VersionPrefix>0.1.0</VersionPrefix>
     <VersionSuffix>alpha</VersionSuffix>
-    <VersionSuffix Condition="'$(CI_COMMIT_SHORT_SHA)' != ''">$(VersionSuffix)+$(CI_COMMIT_SHORT_SHA)</VersionSuffix>
+    <VersionSuffix Condition="'$(CI_COMMIT_SHORT_SHA)' != ''">$(VersionSuffix).$(CI_COMMIT_SHORT_SHA)</VersionSuffix>
   </PropertyGroup>
 
   <!-- Default settings that are otherwise undefined -->
