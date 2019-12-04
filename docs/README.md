@@ -1,4 +1,4 @@
-# Singyeong.Net #
+# Singyeong.Net [![MyGet][myget-image]][myget-link] [![Pipelines][ci-pipeline-image]][ci-pipeline-link] #
 
 An asynchronous client library for [신경][singyeong], a dynamic metadata-oriented
 service mesh.
@@ -63,4 +63,8 @@ while (await reader.WaitToReadAsync(cancellationToken))
 - Clean up the codebase
 - Add better failover strategies
 
+[ci-pipeline-link]: https://gitlab.com/FiniteReality/Singyeong.Net/pipelines
+[ci-pipeline-image]: https://gitlab.com/FiniteReality/Singyeong.Net/badges/master/pipeline.svg
+[myget-link]: https://www.myget.org/feed/finitereality/package/nuget/Singyeong.Net
+[myget-image]: https://img.shields.io/myget/finitereality/vpre/Singyeong.Net.svg?label=myget
 [singyeong]: https://github.com/queer/singyeong
