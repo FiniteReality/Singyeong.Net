@@ -15,20 +15,29 @@ namespace Singyeong.Converters
         }
 
         public override void Write(Utf8JsonWriter writer,
-            SingyeongTarget? value, JsonSerializerOptions options)
+            SingyeongTarget? target, JsonSerializerOptions options)
         {
-            if (value.HasValue)
+            if (target.HasValue)
             {
                 writer.WriteStartObject();
 
-                writer.WriteString("application", value.Value.ApplicationId);
-                writer.WriteBoolean("restricted", value.Value.AllowRestricted);
-                writer.WriteString("key", value.Value.ConsistentHashKey);
+                if (target.Value.ApplicationId != null)
+                    writer.WriteString("application",
+                        target.Value.ApplicationId);
+                else if (target.Value.ApplicationTags != null)
+                {
+                    writer.WriteStartArray("application");
+                    foreach (var value in target.Value.ApplicationTags)
+                        writer.WriteStringValue(value);
+                    writer.WriteEndArray();
+                }
+                writer.WriteBoolean("restricted", target.Value.AllowRestricted);
+                writer.WriteString("key", target.Value.ConsistentHashKey);
 
-                if (value.Value.Query != null)
+                if (target.Value.Query != null)
                 {
                     writer.WritePropertyName("ops");
-                    QueryCompiler.WriteQuery(writer, value.Value.Query);
+                    QueryCompiler.WriteQuery(writer, target.Value.Query);
                 }
                 else
                 {

@@ -29,6 +29,7 @@ namespace Singyeong
         private readonly IReadOnlyList<(Uri endpoint, string authToken)>
             _endpoints;
         private readonly string _applicationId;
+        private readonly string[] _applicationTags;
         private readonly Action<ClientWebSocketOptions>? _configureWebSocket;
         private readonly CancellationTokenSource _disposeCancelToken;
         private readonly ValueTaskCompletionSource<int> _heartbeatPromise;
@@ -67,14 +68,15 @@ namespace Singyeong
         }
 
         internal SingyeongClient(IReadOnlyList<(Uri, string)> endpoints,
-            string applicationId, ChannelOptions? sendOptions,
-            ChannelOptions? receiveOptions,
+            string applicationId, string[] applicationTags,
+            ChannelOptions? sendOptions, ChannelOptions? receiveOptions,
             JsonSerializerOptions? serializerOptions,
             Action<ClientWebSocketOptions>? configureWebSocket,
             IDictionary<string, SingyeongMetadata> _initialMetadata)
         {
             _endpoints = endpoints;
             _applicationId = applicationId;
+            _applicationTags = applicationTags;
 
             _configureWebSocket = configureWebSocket;
 
@@ -246,6 +248,50 @@ namespace Singyeong
         }
 
         /// <summary>
+        /// Enqueues an item to be sent to a single client
+        /// </summary>
+        /// <param name="tags">
+        /// The application tags to perform service discovery with.
+        /// </param>
+        /// <param name="item">
+        /// The item to send.
+        /// </param>
+        /// <param name="allowRestricted">
+        /// Whether to allow restricted clients to be chosen when querying.
+        /// </param>
+        /// <param name="query">
+        /// The query to perform.
+        /// </param>
+        /// <param name="cancellationToken">
+        /// A <see cref="CancellationToken"/> used to monitor for cancellation.
+        /// </param>
+        /// <returns>
+        /// A <see cref="ValueTask"/> which completes when the write operation
+        /// completes.
+        /// </returns>
+        public ValueTask SendToAsync(string[] tags, object item,
+            bool allowRestricted = false,
+            Expression<Func<SingyeongQuery, bool>>? query = default,
+            CancellationToken cancellationToken = default)
+        {
+            return _sendQueue.Writer.WriteAsync(new SingyeongDispatch
+            {
+                DispatchType = "SEND",
+                Payload = new SingyeongSend
+                {
+                    Target = new SingyeongTarget
+                    {
+                        ApplicationTags = tags,
+                        AllowRestricted = allowRestricted,
+                        ConsistentHashKey = Guid.NewGuid().ToString(),
+                        Query = query
+                    },
+                    Payload = item
+                }
+            }, cancellationToken);
+        }
+
+        /// <summary>
         /// Enqueues an item to be sent to multiple clients.
         /// </summary>
         /// <param name="application">
@@ -280,6 +326,49 @@ namespace Singyeong
                     Target = new SingyeongTarget
                     {
                         ApplicationId = application,
+                        AllowRestricted = allowRestricted,
+                        Query = query
+                    },
+                    Payload = item
+                }
+            }, cancellationToken);
+        }
+
+        /// <summary>
+        /// Enqueues an item to be sent to multiple clients.
+        /// </summary>
+        /// <param name="tags">
+        /// The application tags to perform service discovery with.
+        /// </param>
+        /// <param name="item">
+        /// The item to send.
+        /// </param>
+        /// <param name="allowRestricted">
+        /// Whether to allow restricted clients to be chosen when querying.
+        /// </param>
+        /// <param name="query">
+        /// The query to perform.
+        /// </param>
+        /// <param name="cancellationToken">
+        /// A <see cref="CancellationToken"/> used to monitor for cancellation.
+        /// </param>
+        /// <returns>
+        /// A <see cref="ValueTask"/> which completes when the write operation
+        /// completes.
+        /// </returns>
+        public ValueTask BroadcastToAsync(string[] tags, object item,
+            bool allowRestricted = false,
+            Expression<Func<SingyeongQuery, bool>>? query = default,
+            CancellationToken cancellationToken = default)
+        {
+            return _sendQueue.Writer.WriteAsync(new SingyeongDispatch
+            {
+                DispatchType = "BROADCAST",
+                Payload = new SingyeongBroadcast
+                {
+                    Target = new SingyeongTarget
+                    {
+                        ApplicationTags = tags,
                         AllowRestricted = allowRestricted,
                         Query = query
                     },
@@ -739,7 +828,8 @@ namespace Singyeong
                     ClientId = _clientId!,
                     ApplicationId = _applicationId,
                     Reconnect = _isReconnect,
-                    Authentication = _currentAuthToken
+                    Authentication = _currentAuthToken,
+                    Tags = _applicationTags
                 }
             }, cancellationToken);
         }

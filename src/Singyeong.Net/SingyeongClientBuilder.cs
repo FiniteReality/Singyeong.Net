@@ -16,6 +16,7 @@ namespace Singyeong
         private readonly List<(Uri endpoint, string authToken)> _endpoints;
         private readonly Dictionary<string, SingyeongMetadata> _metadata;
         private readonly string _applicationId;
+        private readonly List<string> _applicationTags;
 
         private ChannelOptions? _sendChannelOptions;
         private ChannelOptions? _receiveChannelOptions;
@@ -33,6 +34,7 @@ namespace Singyeong
             _endpoints = new List<(Uri, string)>();
             _metadata = new Dictionary<string, SingyeongMetadata>();
             _applicationId = applicationId;
+            _applicationTags = new List<string>();
         }
 
         /// <summary>
@@ -189,6 +191,25 @@ namespace Singyeong
         }
 
         /// <summary>
+        /// Adds one or more tags to the singyeong client.
+        /// </summary>
+        /// <param name="tags">
+        /// The metadata tags to add.
+        /// </param>
+        /// <returns>
+        /// A reference to this instance after the operation has completed.
+        /// </returns>
+        public SingyeongClientBuilder AddTags(params string[] tags)
+        {
+            if (tags == null)
+                throw new ArgumentNullException(nameof(tags));
+
+            _applicationTags.AddRange(tags);
+
+            return this;
+        }
+
+        /// <summary>
         /// Builds the singyeong client with the given options.
         /// </summary>
         /// <returns>
@@ -198,6 +219,7 @@ namespace Singyeong
         public SingyeongClient Build()
         {
             return new SingyeongClient(_endpoints, _applicationId,
+                _applicationTags.ToArray(),
                 _sendChannelOptions, _receiveChannelOptions,
                 _serializerOptions, _configureClientWebSocket, _metadata);
         }
