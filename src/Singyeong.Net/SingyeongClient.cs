@@ -29,7 +29,7 @@ namespace Singyeong
         private readonly IReadOnlyList<(Uri endpoint, string authToken)>
             _endpoints;
         private readonly string _applicationId;
-        private readonly ClientWebSocket _client;
+        private readonly Action<ClientWebSocketOptions>? _configureWebSocket;
         private readonly CancellationTokenSource _disposeCancelToken;
         private readonly ValueTaskCompletionSource<int> _heartbeatPromise;
 
@@ -76,8 +76,7 @@ namespace Singyeong
             _endpoints = endpoints;
             _applicationId = applicationId;
 
-            _client = new ClientWebSocket();
-            configureWebSocket?.Invoke(_client.Options);
+            _configureWebSocket = configureWebSocket;
 
             _serializerOptions = GetSerializerOptions(serializerOptions);
 
@@ -125,7 +124,6 @@ namespace Singyeong
         public void Dispose()
         {
             _disposeCancelToken.Cancel();
-            _client.Dispose();
         }
 
         /// <summary>
@@ -164,6 +162,7 @@ namespace Singyeong
                     await RunInternalAsync(url, sessionToken.Token);
                 }
                 catch (OperationCanceledException)
+                    when (cancellationToken.IsCancellationRequested)
                 {
                     // No need for an Interlocked here since we're only
                     // allowing a single call to succeed earlier
@@ -193,6 +192,11 @@ namespace Singyeong
 
             static bool IsRecoverable(Exception e)
             {
+                // Likely because of an invalid payload or no valid clients to
+                // send to.
+                if (e is OperationCanceledException)
+                    return true;
+
                 return false;
             }
         }
@@ -277,7 +281,6 @@ namespace Singyeong
                     {
                         ApplicationId = application,
                         AllowRestricted = allowRestricted,
-                        ConsistentHashKey = Guid.NewGuid().ToString(),
                         Query = query
                     },
                     Payload = item
@@ -367,34 +370,46 @@ namespace Singyeong
             var pipe = new Pipe();
             _heartbeatPromise.Reset();
 
-            await _client.ConnectAsync(endpoint, cancellationToken);
+            using var closeToken = new CancellationTokenSource();
+            using var cancelToken = CancellationTokenSource
+                .CreateLinkedTokenSource(closeToken.Token, cancellationToken);
+
+            using var client = new ClientWebSocket();
+            _configureWebSocket?.Invoke(client.Options);
+
+            await client.ConnectAsync(endpoint, cancellationToken);
 
             try
             {
                 await Task.WhenAll(
-                    ReceiveAsync(_client, pipe.Writer, cancellationToken),
-                    WriteAsync(_client, _sendQueue.Reader, _serializerOptions,
-                        cancellationToken),
+                    WriteAsync(client, _sendQueue.Reader, _serializerOptions,
+                        cancelToken.Token),
+                    ReceiveAsync(client, pipe.Writer, closeToken,
+                        cancelToken.Token),
                     ProcessAsync(this, pipe.Reader, _sendQueue.Writer,
-                        cancellationToken),
-                    HeartbeatAsync(_heartbeatPromise, _sendQueue.Writer,
-                        cancellationToken)
+                        cancelToken.Token),
+                    HeartbeatAsync(client, _heartbeatPromise, _sendQueue.Writer,
+                        cancelToken.Token)
                 );
             }
             finally
             {
-                if (_client.State != WebSocketState.Closed)
-                    await _client.CloseAsync(
+                if (client.State != WebSocketState.Closed)
+                {
+                    await client.CloseAsync(
                         WebSocketCloseStatus.NormalClosure, null, default);
+                }
             }
 
             static async Task ReceiveAsync(WebSocket client, PipeWriter writer,
+                CancellationTokenSource closeToken,
                 CancellationToken cancellationToken)
             {
                 FlushResult flushResult = default;
                 try
                 {
-                    while (!flushResult.IsCompleted)
+                    while (!flushResult.IsCompleted ||
+                        client.State != WebSocketState.Closed)
                     {
                         var memory = writer.GetMemory();
                         var receiveResult = await client.ReceiveAsync(memory,
@@ -406,13 +421,20 @@ namespace Singyeong
                             flushResult = await writer.FlushAsync(
                                 cancellationToken);
 
-                        if (receiveResult.MessageType == WebSocketMessageType.Close)
+                        if (receiveResult.MessageType ==
+                            WebSocketMessageType.Close)
+                        {
+                            closeToken.Cancel();
                             break;
+                        }
                     }
-                }
-                finally
-                {
+
                     await writer.CompleteAsync();
+                }
+                catch (Exception e)
+                {
+                    await writer.CompleteAsync(e);
+                    throw;
                 }
             }
 
@@ -421,7 +443,7 @@ namespace Singyeong
                 JsonSerializerOptions serializerOptions,
                 CancellationToken cancellationToken)
             {
-                while (true)
+                while (client.State == WebSocketState.Open)
                 {
                     // TODO: find a safe non-allocating way of doing this
                     var message = await sendQueue.ReadAsync(cancellationToken);
@@ -447,7 +469,8 @@ namespace Singyeong
             ReadResult readResult = default;
             try
             {
-                while (!readResult.IsCompleted)
+                while (!readResult.IsCompleted ||
+                    !readResult.Buffer.IsEmpty)
                 {
                     readResult = await reader.ReadAsync(cancellationToken);
 
@@ -463,10 +486,13 @@ namespace Singyeong
 
                     reader.AdvanceTo(buffer.Start, buffer.End);
                 }
-            }
-            finally
-            {
+
                 await reader.CompleteAsync();
+            }
+            catch (Exception e)
+            {
+                await reader.CompleteAsync(e);
+                throw;
             }
 
             static ValueTask<bool> TryProcessAsync(SingyeongClient client,
@@ -667,6 +693,7 @@ namespace Singyeong
         }
 
         private async Task HeartbeatAsync(
+            ClientWebSocket client,
             ValueTaskCompletionSource<int> heartbeatPromise,
             ChannelWriter<SingyeongPayload> sendQueue,
             CancellationToken cancellationToken)
@@ -674,7 +701,7 @@ namespace Singyeong
             var interval = await heartbeatPromise.WaitAsync(
                 cancellationToken);
 
-            while (true)
+            while (client.State == WebSocketState.Open)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 await Task.Delay(interval, cancellationToken);

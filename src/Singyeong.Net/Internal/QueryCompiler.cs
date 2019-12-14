@@ -17,10 +17,8 @@ namespace Singyeong.Internal
         private static readonly MethodInfo MetadataMethod =
             typeof(SingyeongQuery).GetMethod("Metadata",
                 BindingFlags.Public | BindingFlags.Instance)!;
-        private static readonly MethodInfo ContainsExtensionMethod =
-            typeof(Enumerable).GetMethods()
-                .Where(x => x.Name == "Contains")
-                .Single(x => x.GetParameters().Length == 2);
+
+        private static readonly Type ListType = typeof(List<>);
         private static readonly Type IConvertibleType = typeof(IConvertible);
 
         public static void WriteQuery(Utf8JsonWriter writer,
@@ -48,7 +46,7 @@ namespace Singyeong.Internal
                         WriteSubQuery(binaryExpression.Right, writer);
                         writer.WriteEndArray();
                         break;
-    
+
                     case ExpressionType.OrElse:
                         writer.WriteStartArray("$or");
                         WriteSubQuery(binaryExpression.Left, writer);
@@ -279,28 +277,37 @@ namespace Singyeong.Internal
             expression = default;
             isMetadataList = default;
 
-            if (methodCall.Method != ContainsExtensionMethod)
+            if (methodCall.Method.DeclaringType == null)
+                return false;
+            if (!methodCall.Method.DeclaringType.IsGenericType)
+                return false;
+            if (methodCall.Method.DeclaringType.GetGenericTypeDefinition()
+                != ListType)
+                return false;
+            if (methodCall.Method.Name != "Contains")
                 return false;
 
-            for (int i = 0; i < methodCall.Arguments.Count; i++)
+            if (methodCall.Object is MethodCallExpression metadataContains)
             {
-                var argument = methodCall.Arguments[i];
+                if (!TryGetMetadataName(metadataContains, out name))
+                    return false;
 
-                if (argument is MethodCallExpression metadataCall
-                    && TryGetMetadataName(metadataCall, out name))
-                {
-                    isMetadataList = i == 0;
-                }
-                else
-                {
-                    expression = argument;
-                }
+                expression = methodCall.Arguments[0];
+                isMetadataList = true;
+                return true;
+            }
+            else if (methodCall.Arguments[0] is
+                MethodCallExpression containsMetadata)
+            {
+                if (!TryGetMetadataName(containsMetadata, out name))
+                    return false;
+
+                expression = methodCall.Object;
+                isMetadataList = false;
+                return true;
             }
 
-            if (!(name is {}))
-                return false;
-
-            return true;
+            return false;
         }
 
         private static bool TryGetMetadataName(MethodCallExpression methodCall,
