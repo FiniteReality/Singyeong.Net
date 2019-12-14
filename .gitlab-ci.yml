@@ -7,6 +7,7 @@ stages:
 
 variables:
   MYGET_PACKAGE_URL: "https://www.myget.org/F/finitereality/api/v2/package"
+  NUGET_PACKAGE_URL: "https://www.nuget.org/api/v2/package"
 
 build:
   stage: build
@@ -33,4 +34,5 @@ push:
   script:
     - for file in artifacts/pkg/Release/*; do
         dotnet nuget push $file -s "$MYGET_PACKAGE_URL" -k "$MYGET_API_KEY";
+        dotnet nuget push $file -s "$NUGET_PACKAGE_URL" -k "$NUGET_API_KEY";
       done

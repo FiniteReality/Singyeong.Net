@@ -24,8 +24,7 @@ namespace Singyeong
         // Exponential backoff multiplication factor
         private const double BackoffFactor = 1.2;
 
-        private static readonly JsonSerializerOptions SerializerOptions =
-            GetSerializerOptions();
+        private readonly JsonSerializerOptions _serializerOptions;
 
         private readonly IReadOnlyList<(Uri endpoint, string authToken)>
             _endpoints;
@@ -57,9 +56,10 @@ namespace Singyeong
         public ChannelReader<JsonDocument> DispatchReader
             => _receiveQueue.Reader;
 
-        private static JsonSerializerOptions GetSerializerOptions()
+        private static JsonSerializerOptions GetSerializerOptions(
+            JsonSerializerOptions? existing = null)
         {
-            var options = new JsonSerializerOptions();
+            var options = existing ?? new JsonSerializerOptions();
 
             options.Converters.Add(new SingyeongTargetConverter());
 
@@ -69,6 +69,7 @@ namespace Singyeong
         internal SingyeongClient(IReadOnlyList<(Uri, string)> endpoints,
             string applicationId, ChannelOptions? sendOptions,
             ChannelOptions? receiveOptions,
+            JsonSerializerOptions? serializerOptions,
             Action<ClientWebSocketOptions>? configureWebSocket,
             IDictionary<string, SingyeongMetadata> _initialMetadata)
         {
@@ -77,6 +78,8 @@ namespace Singyeong
 
             _client = new ClientWebSocket();
             configureWebSocket?.Invoke(_client.Options);
+
+            _serializerOptions = GetSerializerOptions(serializerOptions);
 
             _disposeCancelToken = new CancellationTokenSource();
             _heartbeatPromise = new ValueTaskCompletionSource<int>();
@@ -370,7 +373,8 @@ namespace Singyeong
             {
                 await Task.WhenAll(
                     ReceiveAsync(_client, pipe.Writer, cancellationToken),
-                    WriteAsync(_client, _sendQueue.Reader, cancellationToken),
+                    WriteAsync(_client, _sendQueue.Reader, _serializerOptions,
+                        cancellationToken),
                     ProcessAsync(this, pipe.Reader, _sendQueue.Writer,
                         cancellationToken),
                     HeartbeatAsync(_heartbeatPromise, _sendQueue.Writer,
@@ -414,6 +418,7 @@ namespace Singyeong
 
             static async Task WriteAsync(WebSocket client,
                 ChannelReader<SingyeongPayload> sendQueue,
+                JsonSerializerOptions serializerOptions,
                 CancellationToken cancellationToken)
             {
                 while (true)
@@ -424,10 +429,10 @@ namespace Singyeong
                     byte[] buffer;
                     if (message is SingyeongDispatch dispatch)
                         buffer = JsonSerializer.SerializeToUtf8Bytes(dispatch,
-                            options: SerializerOptions);
+                            options: serializerOptions);
                     else
                         buffer = JsonSerializer.SerializeToUtf8Bytes(message,
-                            options: SerializerOptions);
+                            options: serializerOptions);
 
                     await client.SendAsync(new ArraySegment<byte>(buffer),
                         WebSocketMessageType.Text, true, cancellationToken);
@@ -451,7 +456,8 @@ namespace Singyeong
                     while (true)
                     {
                         if (!await TryProcessAsync(client, sendQueue,
-                            ref buffer, cancellationToken))
+                            ref buffer, client._serializerOptions,
+                                cancellationToken))
                             break;
                     }
 
@@ -466,6 +472,7 @@ namespace Singyeong
             static ValueTask<bool> TryProcessAsync(SingyeongClient client,
                 ChannelWriter<SingyeongPayload> sendQueue,
                 ref ReadOnlySequence<byte> buffer,
+                JsonSerializerOptions serializerOptions,
                 CancellationToken cancellationToken)
             {
                 if (buffer.IsEmpty)
@@ -483,25 +490,27 @@ namespace Singyeong
                 {
                     case SingyeongOpcode.Hello:
                         var hello = JsonSerializer.Deserialize<SingyeongHello>(
-                            ref reader);
+                            ref reader, serializerOptions);
                         return client.HandleHelloAsync(hello, sendQueue,
                             cancellationToken);
                     case SingyeongOpcode.Ready:
                         var ready = JsonSerializer.Deserialize<SingyeongReady>(
-                            ref reader);
+                            ref reader, serializerOptions);
                         return client.HandleReadyAsync(ready, sendQueue,
                             cancellationToken);
                     case SingyeongOpcode.Invalid:
                         var error = JsonSerializer
-                            .Deserialize<SingyeongInvalid>(ref reader);
+                            .Deserialize<SingyeongInvalid>(ref reader,
+                                serializerOptions);
                         throw new UnknownErrorException(error.Error);
                     case SingyeongOpcode.Dispatch:
                         return TryHandleDispatchAsync(client,
-                            dispatchType!.Value, ref reader, sendQueue,
-                            cancellationToken);
+                            dispatchType!.Value, ref reader, serializerOptions,
+                            sendQueue, cancellationToken);
                     case SingyeongOpcode.HeartbeatAck:
                         var heartbeat = JsonSerializer
-                            .Deserialize<SingyeongHeartbeat>(ref reader);
+                            .Deserialize<SingyeongHeartbeat>(ref reader,
+                                serializerOptions);
                         return client.HandleHeartbeatAckAsync(heartbeat,
                             cancellationToken);
                     case SingyeongOpcode.Goodbye:
@@ -514,15 +523,18 @@ namespace Singyeong
             static ValueTask<bool> TryHandleDispatchAsync(
                 SingyeongClient client, SingyeongDispatchType dispatchType,
                 ref Utf8JsonReader reader,
+                JsonSerializerOptions serializerOptions,
                 ChannelWriter<SingyeongPayload> sendQueue,
                 CancellationToken cancellationToken)
             {
                 switch (dispatchType)
                 {
                     case SingyeongDispatchType.Send:
-                        return client.HandleSendAsync(ref reader, cancellationToken);
+                        return client.HandleSendAsync(ref reader,
+                            serializerOptions, cancellationToken);
                     case SingyeongDispatchType.Broadcast:
-                        return client.HandleBroadcastAsync(ref reader, cancellationToken);
+                        return client.HandleBroadcastAsync(ref reader,
+                            serializerOptions, cancellationToken);
                     default:
                         throw new UnhandledOpcodeException(
                             SingyeongOpcode.Dispatch);
@@ -735,6 +747,7 @@ namespace Singyeong
         }
 
         private ValueTask<bool> HandleBroadcastAsync(ref Utf8JsonReader reader,
+            JsonSerializerOptions serializerOptions,
             CancellationToken cancellationToken)
         {
             var document = JsonDocument.ParseValue(ref reader);
@@ -744,6 +757,7 @@ namespace Singyeong
         }
 
         private ValueTask<bool> HandleSendAsync(ref Utf8JsonReader reader,
+            JsonSerializerOptions serializerOptions,
             CancellationToken cancellationToken)
         {
             var document = JsonDocument.ParseValue(ref reader);

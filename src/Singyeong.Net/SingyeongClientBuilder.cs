@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Net.WebSockets;
+using System.Text.Json;
 using System.Threading.Channels;
 using Singyeong.Internal;
 using Singyeong.Protocol;
@@ -18,6 +19,7 @@ namespace Singyeong
 
         private ChannelOptions? _sendChannelOptions;
         private ChannelOptions? _receiveChannelOptions;
+        private JsonSerializerOptions? _serializerOptions;
         private Action<ClientWebSocketOptions>? _configureClientWebSocket;
 
         /// <summary>
@@ -72,6 +74,24 @@ namespace Singyeong
             options.SingleWriter = true;
 
             _receiveChannelOptions = options;
+
+            return this;
+        }
+
+        /// <summary>
+        /// Specifies json serializer options for the constructed
+        /// <see cref="SingyeongClient"/>.
+        /// </summary>
+        /// <param name="options">
+        /// The options to use.
+        /// </param>
+        /// <returns>
+        /// A reference to this instance after the operation has completed.
+        /// </returns>
+        public SingyeongClientBuilder WithJsonSerializerOptions(
+            JsonSerializerOptions options)
+        {
+            _serializerOptions = options;
 
             return this;
         }
@@ -179,7 +199,7 @@ namespace Singyeong
         {
             return new SingyeongClient(_endpoints, _applicationId,
                 _sendChannelOptions, _receiveChannelOptions,
-                _configureClientWebSocket, _metadata);
+                _serializerOptions, _configureClientWebSocket, _metadata);
         }
     }
 }
