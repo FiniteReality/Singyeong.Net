@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Singyeong.Converters;
 using System.Collections.Concurrent;
 using System.Linq;
+using System.Diagnostics;
 
 namespace Singyeong
 {
@@ -215,6 +216,9 @@ namespace Singyeong
         /// <param name="allowRestricted">
         /// Whether to allow restricted clients to be chosen when querying.
         /// </param>
+        /// <param name="optional">
+        /// Whether the routing query is optional or not.
+        /// </param>
         /// <param name="query">
         /// The query to perform.
         /// </param>
@@ -225,12 +229,14 @@ namespace Singyeong
         /// A <see cref="ValueTask"/> which completes when the write operation
         /// completes.
         /// </returns>
-        public ValueTask SendToAsync(string application, object item,
-            bool allowRestricted = false,
+        public async Task SendToAsync(string application, object item,
+            bool allowRestricted = false, bool optional = false,
             Expression<Func<SingyeongQuery, bool>>? query = default,
             CancellationToken cancellationToken = default)
         {
-            return _sendQueue.Writer.WriteAsync(new SingyeongDispatch
+            var promise = new TaskCompletionSource<bool>();
+
+            await _sendQueue.Writer.WriteAsync(new SingyeongDispatch
             {
                 DispatchType = "SEND",
                 Payload = new SingyeongSend
@@ -240,11 +246,15 @@ namespace Singyeong
                         ApplicationId = application,
                         AllowRestricted = allowRestricted,
                         ConsistentHashKey = Guid.NewGuid().ToString(),
+                        AllowOptional = optional,
                         Query = query
                     },
                     Payload = item
-                }
+                },
+                SendPromise = promise
             }, cancellationToken);
+
+            await promise.Task;
         }
 
         /// <summary>
@@ -259,6 +269,9 @@ namespace Singyeong
         /// <param name="allowRestricted">
         /// Whether to allow restricted clients to be chosen when querying.
         /// </param>
+        /// <param name="optional">
+        /// Whether the routing query is optional or not.
+        /// </param>
         /// <param name="query">
         /// The query to perform.
         /// </param>
@@ -269,12 +282,14 @@ namespace Singyeong
         /// A <see cref="ValueTask"/> which completes when the write operation
         /// completes.
         /// </returns>
-        public ValueTask SendToAsync(string[] tags, object item,
-            bool allowRestricted = false,
+        public async Task SendToAsync(string[] tags, object item,
+            bool allowRestricted = false, bool optional = false,
             Expression<Func<SingyeongQuery, bool>>? query = default,
             CancellationToken cancellationToken = default)
         {
-            return _sendQueue.Writer.WriteAsync(new SingyeongDispatch
+            var promise = new TaskCompletionSource<bool>();
+
+            await _sendQueue.Writer.WriteAsync(new SingyeongDispatch
             {
                 DispatchType = "SEND",
                 Payload = new SingyeongSend
@@ -284,11 +299,15 @@ namespace Singyeong
                         ApplicationTags = tags,
                         AllowRestricted = allowRestricted,
                         ConsistentHashKey = Guid.NewGuid().ToString(),
+                        AllowOptional = optional,
                         Query = query
                     },
-                    Payload = item
-                }
+                    Payload = item,
+                },
+                SendPromise = promise
             }, cancellationToken);
+
+            await promise.Task;
         }
 
         /// <summary>
@@ -303,6 +322,9 @@ namespace Singyeong
         /// <param name="allowRestricted">
         /// Whether to allow restricted clients to be chosen when querying.
         /// </param>
+        /// <param name="optional">
+        /// Whether the routing query is optional or not.
+        /// </param>
         /// <param name="query">
         /// The query to perform.
         /// </param>
@@ -313,12 +335,14 @@ namespace Singyeong
         /// A <see cref="ValueTask"/> which completes when the write operation
         /// completes.
         /// </returns>
-        public ValueTask BroadcastToAsync(string application, object item,
-            bool allowRestricted = false,
+        public async Task BroadcastToAsync(string application, object item,
+            bool allowRestricted = false, bool optional = false,
             Expression<Func<SingyeongQuery, bool>>? query = default,
             CancellationToken cancellationToken = default)
         {
-            return _sendQueue.Writer.WriteAsync(new SingyeongDispatch
+            var promise = new TaskCompletionSource<bool>();
+
+            await _sendQueue.Writer.WriteAsync(new SingyeongDispatch
             {
                 DispatchType = "BROADCAST",
                 Payload = new SingyeongBroadcast
@@ -327,11 +351,15 @@ namespace Singyeong
                     {
                         ApplicationId = application,
                         AllowRestricted = allowRestricted,
+                        AllowOptional = optional,
                         Query = query
                     },
                     Payload = item
-                }
+                },
+                SendPromise = promise
             }, cancellationToken);
+
+            await promise.Task;
         }
 
         /// <summary>
@@ -346,6 +374,9 @@ namespace Singyeong
         /// <param name="allowRestricted">
         /// Whether to allow restricted clients to be chosen when querying.
         /// </param>
+        /// <param name="optional">
+        /// Whether the routing query is optional or not.
+        /// </param>
         /// <param name="query">
         /// The query to perform.
         /// </param>
@@ -356,12 +387,14 @@ namespace Singyeong
         /// A <see cref="ValueTask"/> which completes when the write operation
         /// completes.
         /// </returns>
-        public ValueTask BroadcastToAsync(string[] tags, object item,
-            bool allowRestricted = false,
+        public async Task BroadcastToAsync(string[] tags, object item,
+            bool allowRestricted = false, bool optional = false,
             Expression<Func<SingyeongQuery, bool>>? query = default,
             CancellationToken cancellationToken = default)
         {
-            return _sendQueue.Writer.WriteAsync(new SingyeongDispatch
+            var promise = new TaskCompletionSource<bool>();
+
+            await _sendQueue.Writer.WriteAsync(new SingyeongDispatch
             {
                 DispatchType = "BROADCAST",
                 Payload = new SingyeongBroadcast
@@ -370,11 +403,15 @@ namespace Singyeong
                     {
                         ApplicationTags = tags,
                         AllowRestricted = allowRestricted,
+                        AllowOptional = optional,
                         Query = query
                     },
-                    Payload = item
-                }
+                    Payload = item,
+                },
+                SendPromise = promise
             }, cancellationToken);
+
+            await promise.Task;
         }
 
         /// <summary>
@@ -532,21 +569,41 @@ namespace Singyeong
                 JsonSerializerOptions serializerOptions,
                 CancellationToken cancellationToken)
             {
-                while (client.State == WebSocketState.Open)
+                while (true)
                 {
                     // TODO: find a safe non-allocating way of doing this
                     var message = await sendQueue.ReadAsync(cancellationToken);
 
-                    byte[] buffer;
-                    if (message is SingyeongDispatch dispatch)
-                        buffer = JsonSerializer.SerializeToUtf8Bytes(dispatch,
-                            options: serializerOptions);
-                    else
-                        buffer = JsonSerializer.SerializeToUtf8Bytes(message,
-                            options: serializerOptions);
+                    Debug.Assert(message.SendPromise != null);
 
-                    await client.SendAsync(new ArraySegment<byte>(buffer),
-                        WebSocketMessageType.Text, true, cancellationToken);
+                    if (client.State != WebSocketState.Open)
+                    {
+                        _ = message.SendPromise.TrySetException(
+                            new UnknownErrorException(
+                                "Not connected to websocket"));
+                        return;
+                    }
+
+                    try
+                    {
+                        byte[] buffer;
+                        if (message is SingyeongDispatch dispatch)
+                            buffer = JsonSerializer.SerializeToUtf8Bytes(
+                                dispatch, options: serializerOptions);
+                        else
+                            buffer = JsonSerializer.SerializeToUtf8Bytes(
+                                message, options: serializerOptions);
+
+                        await client.SendAsync(new ArraySegment<byte>(buffer),
+                            WebSocketMessageType.Text, true,
+                            cancellationToken);
+
+                        _ = message.SendPromise!.TrySetResult(true);
+                    }
+                    catch (Exception e)
+                    {
+                        _ = message.SendPromise!.TrySetException(e);
+                    }
                 }
             }
         }
@@ -642,18 +699,17 @@ namespace Singyeong
                 ChannelWriter<SingyeongPayload> sendQueue,
                 CancellationToken cancellationToken)
             {
-                switch (dispatchType)
+                return dispatchType switch
                 {
-                    case SingyeongDispatchType.Send:
-                        return client.HandleSendAsync(ref reader,
-                            serializerOptions, cancellationToken);
-                    case SingyeongDispatchType.Broadcast:
-                        return client.HandleBroadcastAsync(ref reader,
-                            serializerOptions, cancellationToken);
-                    default:
-                        throw new UnhandledOpcodeException(
-                            SingyeongOpcode.Dispatch);
-                }
+                    SingyeongDispatchType.Send =>
+                        client.HandleSendAsync(ref reader, serializerOptions,
+                            cancellationToken),
+                    SingyeongDispatchType.Broadcast =>
+                        client.HandleBroadcastAsync(ref reader,
+                            serializerOptions, cancellationToken),
+                    _ => throw new UnhandledOpcodeException(
+                        SingyeongOpcode.Dispatch),
+                };
             }
 
             // This is necessary to read the top level json structure as it

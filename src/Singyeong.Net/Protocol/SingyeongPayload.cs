@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using System.Threading.Tasks;
 
 namespace Singyeong.Protocol
 {
@@ -9,5 +10,7 @@ namespace Singyeong.Protocol
 
         [JsonPropertyName("d")]
         public object? Payload { get; set; }
+
+        public TaskCompletionSource<bool>? SendPromise { get; set; }
     }
 }
