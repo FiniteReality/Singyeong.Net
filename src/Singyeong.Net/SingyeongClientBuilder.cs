@@ -1,3 +1,4 @@
+using Polly;
 using System;
 using System.Collections.Generic;
 using System.Net.WebSockets;
@@ -13,11 +14,11 @@ namespace Singyeong
     /// </summary>
     public sealed class SingyeongClientBuilder
     {
-        private readonly List<(Uri endpoint, string authToken)> _endpoints;
         private readonly Dictionary<string, SingyeongMetadata> _metadata;
         private readonly string _applicationId;
         private readonly List<string> _applicationTags;
 
+        private IAsyncPolicy? _policy;
         private ChannelOptions? _sendChannelOptions;
         private ChannelOptions? _receiveChannelOptions;
         private JsonSerializerOptions? _serializerOptions;
@@ -31,7 +32,6 @@ namespace Singyeong
         /// </param>
         public SingyeongClientBuilder(string applicationId)
         {
-            _endpoints = new List<(Uri, string)>();
             _metadata = new Dictionary<string, SingyeongMetadata>();
             _applicationId = applicationId;
             _applicationTags = new List<string>();
@@ -117,41 +117,17 @@ namespace Singyeong
         }
 
         /// <summary>
-        /// Adds a connection endpoint to the singyeong client.
+        /// Configures a policy to use for error handling.
         /// </summary>
-        /// <param name="endpoint">
-        /// The endpoint to add.
-        /// </param>
-        /// <param name="authToken">
-        /// The authentication token to use for this endpoint.
+        /// <param name="policy">
+        /// The policy to use.
         /// </param>
         /// <returns>
         /// A reference to this instance after the operation has completed.
         /// </returns>
-        public SingyeongClientBuilder AddEndpoint(string endpoint,
-            string authToken)
+        public SingyeongClientBuilder WithReconnectPolicy(IAsyncPolicy policy)
         {
-            _endpoints.Add((new Uri(endpoint), authToken));
-
-            return this;
-        }
-
-        /// <summary>
-        /// Adds a connection endpoint to the singyeong client.
-        /// </summary>
-        /// <param name="endpoint">
-        /// The endpoint to add.
-        /// </param>
-        /// <param name="authToken">
-        /// The authentication token to use for this endpoint.
-        /// </param>
-        /// <returns>
-        /// A reference to this instance after the operation has completed.
-        /// </returns>
-        public SingyeongClientBuilder AddEndpoint(Uri endpoint,
-            string authToken)
-        {
-            _endpoints.Add((endpoint, authToken));
+            _policy = policy;
 
             return this;
         }
@@ -218,7 +194,7 @@ namespace Singyeong
         /// </returns>
         public SingyeongClient Build()
         {
-            return new SingyeongClient(_endpoints, _applicationId,
+            return new SingyeongClient(_policy, _applicationId,
                 _applicationTags.ToArray(),
                 _sendChannelOptions, _receiveChannelOptions,
                 _serializerOptions, _configureClientWebSocket, _metadata);

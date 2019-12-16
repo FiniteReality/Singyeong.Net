@@ -2,7 +2,6 @@
 using Singyeong.Internal;
 using System;
 using System.Collections.Generic;
-using System.IO.Pipelines;
 using System.Linq.Expressions;
 using System.Net.WebSockets;
 using System.Text.Json;
@@ -12,47 +11,35 @@ using System.Threading.Tasks;
 using Singyeong.Converters;
 using System.Collections.Concurrent;
 using System.Linq;
-using System.Diagnostics;
+using Polly;
 
 namespace Singyeong
 {
     /// <summary>
-    /// A client capable of connecting to server instances of Singyeong
+    /// A client capable of connecting to server instances of Singyeong.
     /// </summary>
-    public sealed partial class SingyeongClient : IDisposable
+    public sealed partial class SingyeongClient
     {
-        // Exponential backoff multiplication factor
-        private const double BackoffFactor = 1.2;
-
-        private readonly JsonSerializerOptions _serializerOptions;
-
-        private readonly IReadOnlyList<(Uri endpoint, string authToken)>
-            _endpoints;
         private readonly string _applicationId;
         private readonly string[] _applicationTags;
         private readonly Action<ClientWebSocketOptions>? _configureWebSocket;
-        private readonly CancellationTokenSource _disposeCancelToken;
-        private readonly ValueTaskCompletionSource<int> _heartbeatPromise;
 
         private readonly ConcurrentDictionary<string, SingyeongMetadata>
             _metadata;
-
-        private readonly Channel<SingyeongPayload> _sendQueue;
+        private readonly IAsyncPolicy? _reconnectPolicy;
         private readonly Channel<JsonDocument> _receiveQueue;
-
+        private readonly Channel<SingyeongPayload> _sendQueue;
+        private readonly JsonSerializerOptions _serializerOptions;
 
         private string? _clientId;
-        private int _started = 0;
-
-        private bool _isReconnect;
-        private string? _currentAuthToken;
-
-        private long _lastHeartbeatAck;
         private long _lastHeartbeat;
+        private long _lastHeartbeatAck;
+        private int _state = 0;
+
 
         /// <summary>
-        /// A <see cref="ChannelReader{T}"/> used to read dispatches from
-        /// Singyeong.
+        /// Gets a <see cref="ChannelReader{T}"/> used to read dispatches from
+        /// the Singyeong server.
         /// </summary>
         public ChannelReader<JsonDocument> DispatchReader
             => _receiveQueue.Reader;
@@ -67,28 +54,20 @@ namespace Singyeong
             return options;
         }
 
-        internal SingyeongClient(IReadOnlyList<(Uri, string)> endpoints,
+        internal SingyeongClient(IAsyncPolicy? reconnectPolicy,
             string applicationId, string[] applicationTags,
             ChannelOptions? sendOptions, ChannelOptions? receiveOptions,
             JsonSerializerOptions? serializerOptions,
             Action<ClientWebSocketOptions>? configureWebSocket,
             IDictionary<string, SingyeongMetadata> _initialMetadata)
         {
-            _endpoints = endpoints;
             _applicationId = applicationId;
             _applicationTags = applicationTags;
-
             _configureWebSocket = configureWebSocket;
-
-            _serializerOptions = GetSerializerOptions(serializerOptions);
-
-            _disposeCancelToken = new CancellationTokenSource();
-            _heartbeatPromise = new ValueTaskCompletionSource<int>();
-
-            _heartbeatPromise.SetResult(0);
-
             _metadata = new ConcurrentDictionary<string, SingyeongMetadata>(
                 _initialMetadata);
+            _reconnectPolicy = reconnectPolicy;
+            _serializerOptions = GetSerializerOptions(serializerOptions);
 
             if (sendOptions == null)
                 _sendQueue = Channel.CreateBounded<SingyeongPayload>(128);
@@ -121,86 +100,36 @@ namespace Singyeong
         }
 
         /// <summary>
-        /// Disposes of any resources used by the client.
+        /// Connects to Singyeong and processes events until an exception
+        /// occurs or the client disconnects.
         /// </summary>
-        public void Dispose()
-        {
-            _disposeCancelToken.Cancel();
-        }
-
-        /// <summary>
-        /// Runs the client, until an unrecoverable error occurs.
-        /// </summary>
+        /// <param name="endpoint">
+        /// The endpoint to connect to.
+        /// </param>
+        /// <param name="authToken">
+        /// The authentication token to use when connecting to
+        /// <paramref name="endpoint"/>.
+        /// </param>
         /// <param name="cancellationToken">
         /// A <see cref="CancellationToken"/> used to stop the client.
         /// </param>
         /// <returns>
         /// A <see cref="Task"/> which completes when the client is stopped.
         /// </returns>
-        public async Task RunAsync(
+        public async Task RunAsync(Uri endpoint, string? authToken,
             CancellationToken cancellationToken = default)
         {
-            if (Interlocked.Exchange(ref _started, 1) == 1)
+            if (Interlocked.Exchange(ref _state, 1) == 1)
                 throw new InvalidOperationException(
                     "Cannot start an already running client");
 
-            using var sessionToken = CancellationTokenSource
-                .CreateLinkedTokenSource(cancellationToken,
-                    _disposeCancelToken.Token);
-
-            var random = new Random();
-            var connectionAttempts = 0;
-            var endpointInfo = GetEndpoint(random);
-            _clientId = Guid.NewGuid().ToString();
-
-            while (true)
-            {
-                try
-                {
-                    Uri url;
-                    (url, _currentAuthToken) = endpointInfo;
-                    _isReconnect = connectionAttempts > 0;
-
-                    await RunInternalAsync(url, sessionToken.Token);
-                }
-                catch (OperationCanceledException)
-                    when (cancellationToken.IsCancellationRequested)
-                {
-                    // No need for an Interlocked here since we're only
-                    // allowing a single call to succeed earlier
-                    _started = 0;
-                    throw;
-                }
-                catch (Exception e)
-                {
-                    if (!IsRecoverable(e))
-                    {
-                        _started = 0;
-                        throw;
-                    }
-                }
-
-                await Task.Delay(
-                    (int)Math.Pow(BackoffFactor, connectionAttempts) * 1000,
-                    sessionToken.Token);
-
-                if (connectionAttempts++ > 5)
-                {
-                    _clientId = Guid.NewGuid().ToString();
-                    endpointInfo = GetEndpoint(random);
-                    connectionAttempts = 0;
-                }
-            }
-
-            static bool IsRecoverable(Exception e)
-            {
-                // Likely because of an invalid payload or no valid clients to
-                // send to.
-                if (e is OperationCanceledException)
-                    return true;
-
-                return false;
-            }
+            if (_reconnectPolicy != null)
+                await _reconnectPolicy.ExecuteAsync(
+                    (ct) => RunInternalAsync(endpoint, authToken, ct),
+                    cancellationToken);
+            else
+                await RunInternalAsync(endpoint, authToken, cancellationToken);
+            _state = 0;
         }
 
         /// <summary>
@@ -228,14 +157,12 @@ namespace Singyeong
         /// A <see cref="ValueTask"/> which completes when the write operation
         /// completes.
         /// </returns>
-        public async Task SendToAsync(string application, object item,
+        public ValueTask SendToAsync(string application, object item,
             bool allowRestricted = false, bool optional = false,
             Expression<Func<SingyeongQuery, bool>>? query = default,
             CancellationToken cancellationToken = default)
         {
-            var promise = new TaskCompletionSource<bool>();
-
-            await _sendQueue.Writer.WriteAsync(new SingyeongDispatch
+            return _sendQueue.Writer.WriteAsync(new SingyeongDispatch
             {
                 DispatchType = "SEND",
                 Payload = new SingyeongSend
@@ -249,11 +176,8 @@ namespace Singyeong
                         Query = query
                     },
                     Payload = item
-                },
-                SendPromise = promise
+                }
             }, cancellationToken);
-
-            await promise.Task;
         }
 
         /// <summary>
@@ -281,14 +205,12 @@ namespace Singyeong
         /// A <see cref="ValueTask"/> which completes when the write operation
         /// completes.
         /// </returns>
-        public async Task SendToAsync(string[] tags, object item,
+        public ValueTask SendToAsync(string[] tags, object item,
             bool allowRestricted = false, bool optional = false,
             Expression<Func<SingyeongQuery, bool>>? query = default,
             CancellationToken cancellationToken = default)
         {
-            var promise = new TaskCompletionSource<bool>();
-
-            await _sendQueue.Writer.WriteAsync(new SingyeongDispatch
+            return _sendQueue.Writer.WriteAsync(new SingyeongDispatch
             {
                 DispatchType = "SEND",
                 Payload = new SingyeongSend
@@ -302,11 +224,8 @@ namespace Singyeong
                         Query = query
                     },
                     Payload = item,
-                },
-                SendPromise = promise
+                }
             }, cancellationToken);
-
-            await promise.Task;
         }
 
         /// <summary>
@@ -334,14 +253,12 @@ namespace Singyeong
         /// A <see cref="ValueTask"/> which completes when the write operation
         /// completes.
         /// </returns>
-        public async Task BroadcastToAsync(string application, object item,
+        public ValueTask BroadcastToAsync(string application, object item,
             bool allowRestricted = false, bool optional = false,
             Expression<Func<SingyeongQuery, bool>>? query = default,
             CancellationToken cancellationToken = default)
         {
-            var promise = new TaskCompletionSource<bool>();
-
-            await _sendQueue.Writer.WriteAsync(new SingyeongDispatch
+            return _sendQueue.Writer.WriteAsync(new SingyeongDispatch
             {
                 DispatchType = "BROADCAST",
                 Payload = new SingyeongBroadcast
@@ -354,11 +271,8 @@ namespace Singyeong
                         Query = query
                     },
                     Payload = item
-                },
-                SendPromise = promise
+                }
             }, cancellationToken);
-
-            await promise.Task;
         }
 
         /// <summary>
@@ -386,14 +300,12 @@ namespace Singyeong
         /// A <see cref="ValueTask"/> which completes when the write operation
         /// completes.
         /// </returns>
-        public async Task BroadcastToAsync(string[] tags, object item,
+        public ValueTask BroadcastToAsync(string[] tags, object item,
             bool allowRestricted = false, bool optional = false,
             Expression<Func<SingyeongQuery, bool>>? query = default,
             CancellationToken cancellationToken = default)
         {
-            var promise = new TaskCompletionSource<bool>();
-
-            await _sendQueue.Writer.WriteAsync(new SingyeongDispatch
+            return _sendQueue.Writer.WriteAsync(new SingyeongDispatch
             {
                 DispatchType = "BROADCAST",
                 Payload = new SingyeongBroadcast
@@ -406,11 +318,8 @@ namespace Singyeong
                         Query = query
                     },
                     Payload = item,
-                },
-                SendPromise = promise
+                }
             }, cancellationToken);
-
-            await promise.Task;
         }
 
         /// <summary>
@@ -484,266 +393,7 @@ namespace Singyeong
             });
         }
 
-        private (Uri, string) GetEndpoint(Random random)
-        {
-            return _endpoints[random.Next(_endpoints.Count)];
-        }
-
-        private async Task RunInternalAsync(Uri endpoint,
-            CancellationToken cancellationToken = default)
-        {
-            var pipe = new Pipe();
-            _heartbeatPromise.Reset();
-
-            using var closeToken = new CancellationTokenSource();
-            using var cancelToken = CancellationTokenSource
-                .CreateLinkedTokenSource(closeToken.Token, cancellationToken);
-
-            using var client = new ClientWebSocket();
-            _configureWebSocket?.Invoke(client.Options);
-
-            await client.ConnectAsync(endpoint, cancellationToken);
-
-            try
-            {
-                await Task.WhenAll(
-                    WriteAsync(client, _sendQueue.Reader, _serializerOptions,
-                        cancelToken.Token),
-                    ReceiveAsync(client, pipe.Writer, closeToken,
-                        cancelToken.Token),
-                    ProcessAsync(this, pipe.Reader, _sendQueue.Writer,
-                        cancelToken.Token),
-                    HeartbeatAsync(client, _heartbeatPromise, _sendQueue.Writer,
-                        cancelToken.Token)
-                );
-            }
-            finally
-            {
-                if (client.State != WebSocketState.Closed)
-                {
-                    await client.CloseAsync(
-                        WebSocketCloseStatus.NormalClosure, null, default);
-                }
-            }
-
-            static async Task ReceiveAsync(WebSocket client, PipeWriter writer,
-                CancellationTokenSource closeToken,
-                CancellationToken cancellationToken)
-            {
-                FlushResult flushResult = default;
-                try
-                {
-                    while (!flushResult.IsCompleted ||
-                        client.State != WebSocketState.Closed)
-                    {
-                        var memory = writer.GetMemory();
-                        var receiveResult = await client.ReceiveAsync(memory,
-                            cancellationToken);
-
-                        writer.Advance(receiveResult.Count);
-
-                        if (receiveResult.EndOfMessage)
-                            flushResult = await writer.FlushAsync(
-                                cancellationToken);
-
-                        if (receiveResult.MessageType ==
-                            WebSocketMessageType.Close)
-                        {
-                            closeToken.Cancel();
-                            break;
-                        }
-                    }
-
-                    await writer.CompleteAsync();
-                }
-                catch (Exception e)
-                {
-                    await writer.CompleteAsync(e);
-                    throw;
-                }
-            }
-
-            static async Task WriteAsync(WebSocket client,
-                ChannelReader<SingyeongPayload> sendQueue,
-                JsonSerializerOptions serializerOptions,
-                CancellationToken cancellationToken)
-            {
-                while (true)
-                {
-                    // TODO: find a safe non-allocating way of doing this
-                    var message = await sendQueue.ReadAsync(cancellationToken);
-
-                    Debug.Assert(message.SendPromise != null);
-
-                    if (client.State != WebSocketState.Open)
-                    {
-                        _ = message.SendPromise.TrySetException(
-                            new UnknownErrorException(
-                                "Not connected to websocket"));
-                        return;
-                    }
-
-                    try
-                    {
-                        byte[] buffer;
-                        if (message is SingyeongDispatch dispatch)
-                            buffer = JsonSerializer.SerializeToUtf8Bytes(
-                                dispatch, options: serializerOptions);
-                        else
-                            buffer = JsonSerializer.SerializeToUtf8Bytes(
-                                message, options: serializerOptions);
-
-                        await client.SendAsync(new ArraySegment<byte>(buffer),
-                            WebSocketMessageType.Text, true,
-                            cancellationToken);
-
-                        _ = message.SendPromise!.TrySetResult(true);
-                    }
-                    catch (Exception e)
-                    {
-                        _ = message.SendPromise!.TrySetException(e);
-                    }
-                }
-            }
-        }
-
-        private static async Task ProcessAsync(SingyeongClient client,
-            PipeReader reader, ChannelWriter<SingyeongPayload> sendQueue,
-            CancellationToken cancellationToken)
-        {
-            ReadResult readResult = default;
-            try
-            {
-                while (!readResult.IsCompleted ||
-                    !readResult.Buffer.IsEmpty)
-                {
-                    readResult = await reader.ReadAsync(cancellationToken);
-
-                    var buffer = readResult.Buffer;
-
-                    while (true)
-                    {
-                        if (!await TryProcessPayloadAsync(client, sendQueue,
-                            ref buffer, client._serializerOptions,
-                                cancellationToken))
-                            break;
-                    }
-
-                    reader.AdvanceTo(buffer.Start, buffer.End);
-                }
-
-                await reader.CompleteAsync();
-            }
-            catch (Exception e)
-            {
-                await reader.CompleteAsync(e);
-                throw;
-            }
-        }
-
-        private async Task HeartbeatAsync(
-            ClientWebSocket client,
-            ValueTaskCompletionSource<int> heartbeatPromise,
-            ChannelWriter<SingyeongPayload> sendQueue,
-            CancellationToken cancellationToken)
-        {
-            var interval = await heartbeatPromise.WaitAsync(
-                cancellationToken);
-
-            while (client.State == WebSocketState.Open)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                await Task.Delay(interval, cancellationToken);
-
-                _lastHeartbeat += 1;
-
-                if ((_lastHeartbeat - _lastHeartbeatAck) > 1)
-                    throw new MissedHeartbeatException();
-
-                var ok = await WriteToQueue(sendQueue, new SingyeongPayload
-                {
-                    Opcode = SingyeongOpcode.Heartbeat,
-                    Payload = new SingyeongHeartbeat
-                    {
-                        ClientId = _clientId!
-                    }
-                }, cancellationToken);
-
-                if (!ok)
-                    break;
-            }
-        }
-
-        private ValueTask<bool> HandleHelloAsync(SingyeongHello hello,
-            ChannelWriter<SingyeongPayload> sendQueue,
-            CancellationToken cancellationToken)
-        {
-            _ = _heartbeatPromise.TrySetResult(hello.HeartbeatIntervalMs);
-
-            return WriteToQueue(sendQueue, new SingyeongPayload
-            {
-                Opcode = SingyeongOpcode.Identify,
-                Payload = new SingyeongIdentify
-                {
-                    ClientId = _clientId!,
-                    ApplicationId = _applicationId,
-                    Reconnect = _isReconnect,
-                    Authentication = _currentAuthToken,
-                    Tags = _applicationTags
-                }
-            }, cancellationToken);
-        }
-
-        private ValueTask<bool> HandleReadyAsync(SingyeongReady ready,
-            ChannelWriter<SingyeongPayload> sendQueue,
-            CancellationToken cancellationToken)
-        {
-            if (ready.ClientId != _clientId)
-                return new ValueTask<bool>(false);
-
-            if (!_metadata.IsEmpty)
-                return WriteToQueue(sendQueue, new SingyeongDispatch
-                {
-                    DispatchType = "UPDATE_METADATA",
-                    Payload = _metadata.ToDictionary(x => x.Key, x => x.Value)
-                }, cancellationToken);
-
-            return new ValueTask<bool>(true);
-        }
-
-        private ValueTask<bool> HandleHeartbeatAckAsync(
-            SingyeongHeartbeat heartbeat,
-            CancellationToken cancellationToken)
-        {
-            if (heartbeat.ClientId != _clientId)
-                return new ValueTask<bool>(false);
-
-            _lastHeartbeatAck += 1;
-
-            return new ValueTask<bool>(true);
-        }
-
-        private ValueTask<bool> HandleBroadcastAsync(ref Utf8JsonReader reader,
-            JsonSerializerOptions serializerOptions,
-            CancellationToken cancellationToken)
-        {
-            var document = JsonDocument.ParseValue(ref reader);
-
-            return WriteToQueue(_receiveQueue.Writer, document,
-                cancellationToken);
-        }
-
-        private ValueTask<bool> HandleSendAsync(ref Utf8JsonReader reader,
-            JsonSerializerOptions serializerOptions,
-            CancellationToken cancellationToken)
-        {
-            var document = JsonDocument.ParseValue(ref reader);
-
-            return WriteToQueue(_receiveQueue.Writer, document,
-                cancellationToken);
-        }
-
-        private static ValueTask<bool> WriteToQueue<T>(ChannelWriter<T> writer,
+        private static ValueTask<bool> WriteToQueueAsync<T>(ChannelWriter<T> writer,
             T value, CancellationToken cancellationToken)
         {
             return writer.TryWrite(value)
