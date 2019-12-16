@@ -102,10 +102,16 @@ namespace Singyeong
                         {
                             if (reader.ValueTextEquals(
                                 ProtocolConstants.SendEventType))
+                            {
                                 dispatchType = SingyeongDispatchType.Send;
+                                break;
+                            }
                             else if (reader.ValueTextEquals(
                                 ProtocolConstants.BroadcastEventType))
+                            {
                                 dispatchType = SingyeongDispatchType.Broadcast;
+                                break;
+                            }
                         }
 
                         // Unhandled dispatch types should fail to parse.
