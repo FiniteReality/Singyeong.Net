@@ -128,13 +128,12 @@ namespace Singyeong
                 try
                 {
                     ReadResult readResult = default;
-                    JsonReaderState state = default;
                     while (!readResult.IsCompleted)
                     {
                         readResult = await reader.ReadAsync(cancellationToken);
                         var buffer = readResult.Buffer;
 
-                        var status = TryReadPayload(buffer, ref state,
+                        var status = TryReadPayload(buffer,
                             out var payload, out var opcode,
                             out var dispatchType, out var timestamp,
                             out var endOfPayload);
@@ -229,14 +228,13 @@ namespace Singyeong
             try
             {
                 ReadResult readResult = default;
-                JsonReaderState state = default;
                 while (!readResult.IsCompleted ||
                     !readResult.Buffer.IsEmpty)
                 {
                     readResult = await reader.ReadAsync(cancellationToken);
                     var buffer = readResult.Buffer;
 
-                    var status = TryReadPayload(buffer, ref state,
+                    var status = TryReadPayload(buffer,
                         out var payload, out var opcode,
                         out var dispatchType, out var timestamp,
                         out var endOfPayload);
@@ -262,7 +260,6 @@ namespace Singyeong
                                 $"{opcode.Value}");
 
                         reader.AdvanceTo(endOfPayload);
-                        state = default;
                     }
                 }
             }

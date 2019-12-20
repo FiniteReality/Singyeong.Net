@@ -9,7 +9,7 @@ namespace Singyeong
     public sealed partial class SingyeongClient
     {
         private static OperationStatus TryReadPayload(
-            ReadOnlySequence<byte> sequence, ref JsonReaderState state,
+            ReadOnlySequence<byte> sequence,
             out ReadOnlySequence<byte> payload,
             out SingyeongOpcode? opcode,
             out SingyeongDispatchType? dispatchType,
@@ -22,22 +22,21 @@ namespace Singyeong
             timestamp = default;
             endOfPayload = default;
 
-            var reader = new Utf8JsonReader(sequence, false, state);
+            var sequenceAsString = System.Text.Encoding.UTF8.GetString(sequence.ToArray());
 
+            var reader = new Utf8JsonReader(sequence, false, default);
             while (reader.Read())
             {
                 switch (reader.TokenType)
                 {
+                    // op
                     case JsonTokenType.PropertyName
                         when reader.ValueTextEquals(
                             ProtocolConstants.OpcodePropertyName)
                             && reader.CurrentDepth == 1:
                     {
                         if (!reader.Read())
-                        {
-                            state = reader.CurrentState;
                             return OperationStatus.NeedMoreData;
-                        }
 
                         if (reader.TokenType != JsonTokenType.Number)
                             return OperationStatus.InvalidData;
@@ -49,6 +48,7 @@ namespace Singyeong
                         break;
                     }
 
+                    // d
                     case JsonTokenType.PropertyName
                         when reader.ValueTextEquals(
                             ProtocolConstants.DataPropertyName)
@@ -57,25 +57,20 @@ namespace Singyeong
                         var start = sequence.Slice(reader.Position);
 
                         if (!reader.TrySkip())
-                        {
-                            state = reader.CurrentState;
                             return OperationStatus.NeedMoreData;
-                        }
 
                         payload = start.Slice(0, reader.Position);
                         break;
                     }
 
+                    // ts
                     case JsonTokenType.PropertyName
                         when reader.ValueTextEquals(
                             ProtocolConstants.TimestampPropertyName)
                             && reader.CurrentDepth == 1:
                     {
                         if (!reader.Read())
-                        {
-                            state = reader.CurrentState;
                             return OperationStatus.NeedMoreData;
-                        }
 
                         if (reader.TokenType != JsonTokenType.Number)
                             return OperationStatus.InvalidData;
@@ -87,18 +82,19 @@ namespace Singyeong
                         break;
                     }
 
+                    // t
                     case JsonTokenType.PropertyName
                         when reader.ValueTextEquals(
                             ProtocolConstants.EventTypePropertyName)
                             && reader.CurrentDepth == 1:
                     {
                         if (!reader.Read())
-                        {
-                            state = reader.CurrentState;
                             return OperationStatus.NeedMoreData;
-                        }
 
-                        if (reader.TokenType == JsonTokenType.String)
+                        if (reader.TokenType == JsonTokenType.Null)
+                            break;
+
+                        else if (reader.TokenType == JsonTokenType.String)
                         {
                             if (reader.ValueTextEquals(
                                 ProtocolConstants.SendEventType))
@@ -119,7 +115,7 @@ namespace Singyeong
                     }
                 }
 
-                if (!payload.IsEmpty && opcode.HasValue)
+                if (!payload.IsEmpty && opcode.HasValue && timestamp.HasValue)
                 {
                     if (opcode == SingyeongOpcode.Dispatch &&
                         !dispatchType.HasValue)
@@ -127,10 +123,7 @@ namespace Singyeong
 
                     while (reader.CurrentDepth > 0)
                         if (!reader.Read())
-                        {
-                            state = reader.CurrentState;
                             return OperationStatus.NeedMoreData;
-                        }
 
                     endOfPayload = reader.Position;
                     return OperationStatus.Done;
