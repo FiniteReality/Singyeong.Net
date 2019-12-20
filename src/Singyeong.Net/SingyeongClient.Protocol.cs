@@ -22,8 +22,6 @@ namespace Singyeong
             timestamp = default;
             endOfPayload = default;
 
-            var sequenceAsString = System.Text.Encoding.UTF8.GetString(sequence.ToArray());
-
             var reader = new Utf8JsonReader(sequence, false, default);
             while (reader.Read())
             {
